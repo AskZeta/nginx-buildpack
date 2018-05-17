@@ -1,0 +1,75 @@
+#!/bin/bash
+
+# Heroku standard way to log buildpack info to console
+status() {
+  echo "-----> $*"
+}
+
+set -e          # fail fast
+set -o pipefail # don't ignore exit codes when piping output
+
+build_dir=$1
+cache_dir=$2
+env_dir=$3
+
+# Versions
+NGINX_VERSION=1.13.7
+MRUBY_VERSION=v1.20.1
+
+# Download URLs
+nginx_tarball_url=http://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz
+mruby_github_url=https://github.com/matsumoto-r/ngx_mruby
+
+# Build paths
+cache=$cache_dir/build/nginx-with-mruby/${NGINX_VERSION}-mruby-${MRUBY_VERSION}
+build=${BUILD_PREFIX}/app/nginx
+src=${PWD}/nginx-${NGINX_VERSION}
+mruby_src=${PWD}/ngx_mruby
+
+mkdir -p $build
+
+if [ -e $cache ]; then
+# Use cached nginx
+  status "Using previously compiled nginx-$NGINX_VERSION"
+  cp -R $cache/nginx/* $build
+else
+  status "Downloading $nginx_tarball_url"
+  curl -L $nginx_tarball_url | tar xz
+
+  status "Downloading MRuby ${MRUBY_VERSION}"
+  if [ -d "$mruby_src" ]; then
+    rm -rf ${mruby_src}
+  fi
+
+  git clone $mruby_github_url
+  pushd ${mruby_src}
+  git checkout $MRUBY_VERSION
+  git submodule init
+  git submodule update
+  popd
+
+  status "Compiling MRuby"
+  cp ./mruby_build_config.rb $mruby_src/build_config.rb
+  pushd ${mruby_src}
+  ./configure --with-ngx-src-root=${src}
+  make build_mruby --silent
+  make generate_gems_config --silent
+  popd
+
+  status "Compiling nginx"
+  pushd $src
+  ./configure --prefix=$build --with-http_stub_status_module --with-http_realip_module --with-http_ssl_module --add-module=${mruby_src} --add-module=${mruby_src}/dependence/ngx_devel_kit $NGINX_OPTIONS
+  make install --silent
+
+  # Clear out cache if our version doesn't exist
+  status "Caching build"
+  rm -rf $cache_dir/*
+  mkdir -p $cache
+  cp -R $build $cache
+fi
+
+mv $build $build_dir
+
+# Add to PATH
+mkdir -p $build_dir/.profile.d
+echo 'PATH=$PATH:$HOME/nginx/sbin' > $build_dir/.profile.d/nginx_path.sh
